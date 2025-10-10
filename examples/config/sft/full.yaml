@@ -10,7 +10,7 @@ packing: false
 mix_strategy: concat
 
 ### model
-model_name_or_path: Qwen/Qwen3-0.6B-Base
+model_name_or_path: /home/work/Qwen/Qwen3-Next-80B-A3B-Instruct/
 attn_impl: flashmask
 
 ### finetuning
@@ -31,7 +31,7 @@ save_strategy: steps
 logging_steps: 1
 gradient_accumulation_steps: 4
 logging_dir: ./vdl_log
-output_dir: ./checkpoints/qwen3_hf_0p6b_sft_ckpts
+output_dir: ./checkpoints/qwen3_next_hf_80b_sft_ckpts
 disable_tqdm: true
 eval_accumulation_steps: 16
 
