@@ -1,0 +1,43 @@
+# NAFNet3D 视频去水印训练配置
+
+model:
+  img_channel: 3
+  input_mask: false
+  width: 32
+  middle_blk_num: 2
+  enc_blk_nums: [2, 2, 4, 6]
+  dec_blk_nums: [2, 2, 2, 2]
+  dw_expand: 2
+  ffn_expand: 2
+
+data:
+  data_root: null
+  num_frames: 5
+  frame_h: 128
+  frame_w: 128
+  fake_length: 64
+
+optim:
+  lr: 0.0002
+  betas: [0.9, 0.99]
+  weight_decay: 0.0
+  eps: 1.0e-8
+
+loss:
+  w_recon_mask: 1.0
+  w_identity: 0.5
+  w_recon_global: 0.1
+
+train:
+  device: cuda
+  dtype: bf16
+  seed: 42
+  batch_size: 1
+  num_workers: 0
+  grad_accum_steps: 4
+  max_steps: 100
+  log_every: 1
+  eval_every: 10
+  ckpt_every: 1
+  ckpt_dir: /tmp/nafnet_yaml_ckpt
+  grad_clip: 1.0
