@@ -85,9 +85,9 @@ class VGG19Features(nn.Layer):
         in_channels = 3
         for item in self.CFG:
             if item == "M":
-                layers.append(nn.MaxPool2D(kernel_size=2, stride=2))
+                layers.append(nn.MaxPool2D(kernel_size=2, stride=2, data_format="NHWC"))
                 continue
-            conv = nn.Conv2D(in_channels, item, kernel_size=3, padding=1)
+            conv = nn.Conv2D(in_channels, item, kernel_size=3, padding=1, data_format="NHWC")
             layers.append(conv)
             layers.append(nn.ReLU())
             in_channels = item
@@ -141,12 +141,12 @@ class VGGLoss(nn.Layer):
         self.resize_to = resize_to
         self.register_buffer(
             "mean",
-            paddle.to_tensor([0.485, 0.456, 0.406], dtype="float32").reshape([1, 3, 1, 1]),
+            paddle.to_tensor([0.485, 0.456, 0.406], dtype="float32"),
             persistable=False,
         )
         self.register_buffer(
             "std",
-            paddle.to_tensor([0.229, 0.224, 0.225], dtype="float32").reshape([1, 3, 1, 1]),
+            paddle.to_tensor([0.229, 0.224, 0.225], dtype="float32"),
             persistable=False,
         )
 
@@ -166,7 +166,7 @@ class VGGLoss(nn.Layer):
 
     def _distance(self, pred, target):
         if self.loss_type == "l1":
-            return F.l1_loss(pred, target)
+            return paddle.abs(pred - target).mean(dtype="float32")
         if self.loss_type == "l2":
             return F.mse_loss(pred, target)
         raise ValueError("loss_type must be 'l1' or 'l2'")
@@ -176,7 +176,7 @@ class VGGLoss(nn.Layer):
         with paddle.no_grad():
             target_features = self.vgg(self._preprocess(target))
 
-        total = paddle.zeros([], dtype=pred.dtype)
+        total = paddle.zeros([], dtype="float32")
         losses = {}
         for name in self.layers:
             loss = self._distance(pred_features[name], target_features[name])
@@ -191,11 +191,12 @@ if __name__ == "__main__":
     rng = np.random.default_rng(2026)
 
     loss_fn = VGGLoss()
+    loss_fn = paddle.amp.decorate(loss_fn, level="O2", dtype="bfloat16")
 
     pred_np = rng.random([32, 3, 256, 256], dtype=np.float32)
     target_np = rng.random([32, 3, 256, 256], dtype=np.float32)
-    pred = paddle.to_tensor(pred_np)
-    target = paddle.to_tensor(target_np)
+    pred = paddle.to_tensor(pred_np.transpose([0, 2, 3, 1]), "bfloat16")
+    target = paddle.to_tensor(target_np.transpose([0, 2, 3, 1]), "bfloat16")
     pred.stop_gradient = False
 
     print(
