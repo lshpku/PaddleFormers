@@ -10,6 +10,17 @@ import triton.language as tl
 # ---------------------------------------------------------------------------
 # Triton kernels — 1D flat reduce, shape agnostic
 # ---------------------------------------------------------------------------
+#
+# grad_sign packing scheme:
+#   每个 program 有 BLOCK_SIZE 条 lane，每条 lane 在 LOOP_K=4 次循环中各处理 1 个 elem，
+#   因此每条 lane 共有 4 个 sign(diff)，每个 sign 只有 3 个状态({-1,0,+1})，
+#   用 2-bit 编码:  +1 -> 0b01, -1 -> 0b10, 0 -> 0b00
+#   4 个 2-bit 正好打包到一个 uint8 中（位 [2k+1:2k] 存放 k 次循环的 sign）。
+#
+# 因此 grad_sign 的字节数 = size / LOOP_K
+# 索引: 第 pid 个 program 的第 c 条 lane 的 packed byte 位于
+#         GradSignPtr + pid * BLOCK_SIZE + c
+# ---------------------------------------------------------------------------
 
 
 @triton.jit
@@ -17,18 +28,21 @@ def l1_loss_fwd_reduce_bwd_kernel(
     InputPtr,
     LabelPtr,
     PartialSumPtr,  # [num_programs] float32
-    GradSignPtr,
+    GradSignPtr,    # [num_programs * BLOCK_SIZE] uint8 (packed 4x2bit)
     size: tl.constexpr,  # total number of elements
     LOOP_K: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Fused kernel: 同时计算 partial sum (|input-label|) 和 grad_input (sign)."""
+    """Fused kernel: 同时计算 partial sum (|input-label|) 和 packed grad_sign."""
+    tl.static_assert(LOOP_K == 4, "LOOP_K must be 4 for 2-bit packing into uint8")
+
     pid = tl.program_id(0)
 
     start = pid * LOOP_K * BLOCK_SIZE
     cols = tl.arange(0, BLOCK_SIZE)
 
     partial = 0.0
+    packed = tl.zeros([BLOCK_SIZE], dtype=tl.uint8)
 
     for k in tl.static_range(LOOP_K):
         offs = start + k * BLOCK_SIZE + cols
@@ -43,25 +57,26 @@ def l1_loss_fwd_reduce_bwd_kernel(
         # accumulate for loss
         partial += tl.sum(abs_diff)
 
-        # sign(diff)
-        sign = tl.where(diff > 0.0, 1, -1)
-        sign = tl.where(diff == 0.0, 0, sign)
+        # encode sign(diff): +1 -> 1, -1 -> 2, 0 -> 0
+        code = tl.where(diff > 0.0, 1, tl.where(diff < 0.0, 2, 0)).to(tl.uint8)
+        packed |= code << (2 * k)
 
-        tl.store(GradSignPtr + offs, sign, mask=mask)
-
+    tl.store(GradSignPtr + pid * BLOCK_SIZE + cols, packed)
     tl.store(PartialSumPtr + pid, partial)
 
 
 @triton.jit
 def l1_loss_bwd_kernel(
     GradOutPtr,  # scalar tensor
-    GradSignPtr,
+    GradSignPtr,  # packed uint8
     GradInputPtr,
     size: tl.constexpr,  # total number of elements
     LOOP_K: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Backward: dx = grad_out * sign(input - label) / N."""
+    """Backward: dx = grad_out * sign(input - label) / N，从 packed grad_sign 解码."""
+    tl.static_assert(LOOP_K == 4, "LOOP_K must be 4 for 2-bit packing into uint8")
+
     pid = tl.program_id(0)
 
     start = pid * LOOP_K * BLOCK_SIZE
@@ -70,11 +85,17 @@ def l1_loss_bwd_kernel(
     go = tl.load(GradOutPtr).to(tl.float32)
     scale = go / tl.full([1], float(size), dtype=tl.float32)
 
+    # 一次性载入该 program 全部 packed sign(BLOCK_SIZE 字节)
+    packed = tl.load(GradSignPtr + pid * BLOCK_SIZE + cols)
+
     for k in tl.static_range(LOOP_K):
         offs = start + k * BLOCK_SIZE + cols
         mask = offs < size
 
-        sign = tl.load(GradSignPtr + offs, mask=mask, other=0)
+        code = (packed >> (2 * k)) & 0x3
+        # decode: 0 -> 0, 1 -> +1, 2 -> -1
+        sign = tl.where(code == 1, 1.0,
+                        tl.where(code == 2, -1.0, 0.0))
         grad = scale * sign
 
         tl.store(GradInputPtr + offs, grad, mask=mask)
@@ -86,18 +107,17 @@ def l1_loss_bwd_kernel(
 
 
 class FusedL1LossTriton(paddle.autograd.PyLayer):
-    """Fused L1 Loss with cached grad bitmap."""
+    """Fused L1 Loss with 2-bit packed grad_sign cache."""
 
     @staticmethod
     def forward(ctx, input: Tensor, label: Tensor):
         assert input.shape == label.shape
         assert label.stop_gradient, "label mustn't require grad"
         size = input.size
-        assert size % 1024 == 0, f"size ({size}) must be multiple of 1024"
 
-        # default config
+        # default config — LOOP_K must be 4 for 2-bit packing
         block_size = 1024
-        loop_k = 8
+        loop_k = 4
 
         chunk = block_size * loop_k
         assert size % chunk == 0, (
@@ -107,9 +127,10 @@ class FusedL1LossTriton(paddle.autograd.PyLayer):
 
         # --- Allocate ---
         partial = paddle.empty([num_programs], dtype="float32")
-        grad_sign = paddle.empty(input.shape, dtype="int8")
+        # packed grad_sign: 每条 lane 一个 uint8 (容纳 4 个 2-bit sign)
+        grad_sign = paddle.empty([num_programs * block_size], dtype="uint8")
 
-        # --- Fused kernel: partial reduce + grad compute ---
+        # --- Fused kernel: partial reduce + packed grad compute ---
         l1_loss_fwd_reduce_bwd_kernel[(num_programs,)](
             input, label, partial, grad_sign,
             size=size,
@@ -120,10 +141,11 @@ class FusedL1LossTriton(paddle.autograd.PyLayer):
         # --- Stage 2: paddle.sum -> mean ---
         loss = paddle.sum(partial) / float(size)
 
-        # 把预计算好的 grad_sign 存到 ctx
         ctx.save_for_backward(grad_sign)
 
         ctx.dtype = input.dtype
+        ctx.shape = input.shape
+        ctx.size = size
         ctx.num_programs = num_programs
         ctx.block_size = block_size
         ctx.loop_k = loop_k
@@ -134,11 +156,11 @@ class FusedL1LossTriton(paddle.autograd.PyLayer):
     def backward(ctx, grad_output):
         (grad_sign,) = ctx.saved_tensor()
 
-        grad_input = paddle.empty(grad_sign.shape, dtype=ctx.dtype)
+        grad_input = paddle.empty(ctx.shape, dtype=ctx.dtype)
 
         l1_loss_bwd_kernel[(ctx.num_programs,)](
             grad_output, grad_sign, grad_input,
-            size=grad_sign.size,
+            size=ctx.size,
             LOOP_K=ctx.loop_k,
             BLOCK_SIZE=ctx.block_size,
         )

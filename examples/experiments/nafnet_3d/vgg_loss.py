@@ -157,9 +157,13 @@ class VGGLoss(nn.Layer):
         loss_type="l1",
         input_range="0_1",
         resize_to=None,
+        half_precision=True,
     ):
         super().__init__()
         self.vgg = VGG19Features(weight_path=weight_path, return_layers=layers)
+        self.half_precision = half_precision
+        if half_precision:
+            self.vgg = paddle.amp.decorate(self.vgg, level="O2", dtype="bfloat16")
         self.layers = self.vgg.return_layers
         self.layer_weights = layer_weights or {name: 1.0 for name in self.layers}
         self.loss_type = loss_type
@@ -176,6 +180,13 @@ class VGGLoss(nn.Layer):
             persistable=False,
         )
 
+    @paddle.jit.to_static(full_graph=True)
+    def _image_norm(self, x):
+        x = (x - self.mean) / self.std
+        if self.half_precision:
+            x = x.cast("bfloat16")
+        return x
+
     def _preprocess(self, x):
         if self.input_range == "-1_1":
             x = (x + 1.0) * 0.5
@@ -188,7 +199,7 @@ class VGGLoss(nn.Layer):
                 mode="bilinear",
                 align_corners=False,
             )
-        return (x - self.mean) / self.std
+        return self._image_norm(x)
 
     def _distance(self, pred, target):
         if self.loss_type == "l1":
@@ -200,15 +211,10 @@ class VGGLoss(nn.Layer):
         raise ValueError("loss_type must be 'l1' or 'l2'")
 
     def forward(self, pred, target):
-        paddle.base.core.nvprof_nvtx_push("vgg1")
         pred_features = self.vgg(self._preprocess(pred))
-        paddle.base.core.nvprof_nvtx_pop()
-        paddle.base.core.nvprof_nvtx_push("vgg2")
         with paddle.no_grad():
             target_features = self.vgg(self._preprocess(target))
-        paddle.base.core.nvprof_nvtx_pop()
 
-        paddle.base.core.nvprof_nvtx_push("distance")
         total = paddle.zeros([], dtype="float32")
         losses = {}
         for name in self.layers:
@@ -216,7 +222,6 @@ class VGGLoss(nn.Layer):
             weighted_loss = loss * self.layer_weights.get(name, 1.0)
             losses[name] = weighted_loss
             total = total + weighted_loss
-        paddle.base.core.nvprof_nvtx_pop()
         return total, losses
 
 
@@ -225,12 +230,11 @@ if __name__ == "__main__":
     rng = np.random.default_rng(2026)
 
     loss_fn = VGGLoss()
-    loss_fn = paddle.amp.decorate(loss_fn, level="O2", dtype="bfloat16")
 
     pred_np = rng.random([32, 3, 256, 256], dtype=np.float32)
     target_np = rng.random([32, 3, 256, 256], dtype=np.float32)
-    pred = paddle.to_tensor(pred_np.transpose([0, 2, 3, 1]), "bfloat16")
-    target = paddle.to_tensor(target_np.transpose([0, 2, 3, 1]), "bfloat16")
+    pred = paddle.to_tensor(pred_np.transpose([0, 2, 3, 1]))
+    target = paddle.to_tensor(target_np.transpose([0, 2, 3, 1]))
     pred.stop_gradient = False
 
     print(
