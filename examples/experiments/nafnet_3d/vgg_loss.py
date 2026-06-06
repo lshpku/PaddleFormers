@@ -1,10 +1,36 @@
+import os
 import numpy as np
 import paddle
 import paddle.nn as nn
 import paddle.nn.functional as F
-
+from fusion import FusedBiasReluTriton, FusedL1LossTriton
 
 DEFAULT_VGG19_NPZ_PATH = "/root/autodl-tmp/vgg19-dcbb9e9d-converted.npz"
+
+_USE_TRITON_FUSION = paddle.utils.strtobool(
+    os.getenv("USE_TRITON_FUSION", "0")
+)
+
+
+class Conv2DUnbias(nn.Conv2D):
+    def forward(self, x):
+        return F.conv2d(
+            x, self.weight,
+            stride=self._stride, padding=self._padding,
+            dilation=self._dilation, groups=self._groups,
+            data_format=self._data_format,
+        )
+
+
+class BiasReLU(nn.Layer):
+    def __init__(self, bias):
+        super().__init__()
+        self._bias = bias
+
+    def forward(self, x):
+        if _USE_TRITON_FUSION:
+            return FusedBiasReluTriton.apply(x, self._bias)
+        return F.relu(x + self._bias)
 
 
 class VGG19Features(nn.Layer):
@@ -87,9 +113,9 @@ class VGG19Features(nn.Layer):
             if item == "M":
                 layers.append(nn.MaxPool2D(kernel_size=2, stride=2, data_format="NHWC"))
                 continue
-            conv = nn.Conv2D(in_channels, item, kernel_size=3, padding=1, data_format="NHWC")
+            conv = Conv2DUnbias(in_channels, item, kernel_size=3, padding=1, data_format="NHWC")
             layers.append(conv)
-            layers.append(nn.ReLU())
+            layers.append(BiasReLU(conv.bias))
             in_channels = item
         return layers
 
@@ -166,16 +192,23 @@ class VGGLoss(nn.Layer):
 
     def _distance(self, pred, target):
         if self.loss_type == "l1":
+            if _USE_TRITON_FUSION:
+                return FusedL1LossTriton.apply(pred, target)
             return paddle.abs(pred - target).mean(dtype="float32")
         if self.loss_type == "l2":
             return F.mse_loss(pred, target)
         raise ValueError("loss_type must be 'l1' or 'l2'")
 
     def forward(self, pred, target):
+        paddle.base.core.nvprof_nvtx_push("vgg1")
         pred_features = self.vgg(self._preprocess(pred))
+        paddle.base.core.nvprof_nvtx_pop()
+        paddle.base.core.nvprof_nvtx_push("vgg2")
         with paddle.no_grad():
             target_features = self.vgg(self._preprocess(target))
+        paddle.base.core.nvprof_nvtx_pop()
 
+        paddle.base.core.nvprof_nvtx_push("distance")
         total = paddle.zeros([], dtype="float32")
         losses = {}
         for name in self.layers:
@@ -183,6 +216,7 @@ class VGGLoss(nn.Layer):
             weighted_loss = loss * self.layer_weights.get(name, 1.0)
             losses[name] = weighted_loss
             total = total + weighted_loss
+        paddle.base.core.nvprof_nvtx_pop()
         return total, losses
 
 

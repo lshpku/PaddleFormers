@@ -145,10 +145,7 @@ class Trainer:
 
         l_mask = _masked_l1(pred, target, dilated)
         l_global = (pred - target).abs().mean()
-        l_vgg, _ = self.vgg_loss(
-            pred.squeeze(1).transpose([0, 3, 1, 2]),
-            target.squeeze(1).transpose([0, 3, 1, 2]),
-        )
+        l_vgg, _ = self.vgg_loss(pred.squeeze(1), target.squeeze(1))
 
         # l_mask == 2*l_global == 2*(l_vgg*0.025)
         loss = l_mask + l_global + l_vgg * 0.025

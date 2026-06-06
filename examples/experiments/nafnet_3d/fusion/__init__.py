@@ -1,4 +1,6 @@
+from .bias_relu import FusedBiasReluTriton
 from .depthwise_conv import FusedDepthwiseConvK3P1Triton
+from .l1_loss import FusedL1LossTriton
 from .layernorm import FusedLayerNormTriton
 from .simple_gate import FusedSimpleGateTriton
 from .simple_gate_avg_pool import FusedSimpleGateAvgPoolTriton
