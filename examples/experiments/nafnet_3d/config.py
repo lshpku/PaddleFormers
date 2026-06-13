@@ -45,7 +45,7 @@ class OptimConfig:
     betas: Tuple[float, float] = (0.9, 0.9)
     weight_decay: float = 0.0
     eps: float = 1e-8
-    grad_clip: float = 100.0
+    grad_clip: float = 10.0
 
 
 @dataclass

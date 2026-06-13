@@ -40,6 +40,7 @@ from paddle import Tensor
 from async_utils import to_device, to_host, wait_to_device
 from config import Config
 from vgg_loss import VGGLoss
+from nvprof import nvtx_start, nvtx_stop
 
 
 class ShuffleBatchSampler:
@@ -289,9 +290,9 @@ class Trainer:
                 paddle.device.reset_max_memory_allocated()
 
             if self.global_step == 10:
-                paddle.base.core.nvprof_start()
+                nvtx_start()
             if self.global_step == 15:
-                paddle.base.core.nvprof_stop()
+                nvtx_stop()
 
             if (
                 self.eval_loader is not None

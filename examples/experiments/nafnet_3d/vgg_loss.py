@@ -3,13 +3,10 @@ import numpy as np
 import paddle
 import paddle.nn as nn
 import paddle.nn.functional as F
-from fusion import FusedBiasReluTriton, FusedL1LossTriton
+from fusion import USE_TRITON_FUSION, FusedBiasReluTriton, FusedL1LossTriton
+from nvprof import nvtx_begin, nvtx_end
 
 DEFAULT_VGG19_NPZ_PATH = "/root/autodl-tmp/vgg19-dcbb9e9d-converted.npz"
-
-_USE_TRITON_FUSION = paddle.utils.strtobool(
-    os.getenv("USE_TRITON_FUSION", "0")
-)
 
 
 class Conv2DUnbias(nn.Conv2D):
@@ -28,7 +25,7 @@ class BiasReLU(nn.Layer):
         self._bias = bias
 
     def forward(self, x):
-        if _USE_TRITON_FUSION:
+        if USE_TRITON_FUSION:
             return FusedBiasReluTriton.apply(x, self._bias)
         return F.relu(x + self._bias)
 
@@ -203,7 +200,7 @@ class VGGLoss(nn.Layer):
 
     def _distance(self, pred, target):
         if self.loss_type == "l1":
-            if _USE_TRITON_FUSION:
+            if USE_TRITON_FUSION:
                 return FusedL1LossTriton.apply(pred, target)
             return paddle.abs(pred - target).mean(dtype="float32")
         if self.loss_type == "l2":
@@ -211,6 +208,7 @@ class VGGLoss(nn.Layer):
         raise ValueError("loss_type must be 'l1' or 'l2'")
 
     def forward(self, pred, target):
+        pred = nvtx_begin("vgg", pred)
         pred_features = self.vgg(self._preprocess(pred))
         with paddle.no_grad():
             target_features = self.vgg(self._preprocess(target))
@@ -222,6 +220,7 @@ class VGGLoss(nn.Layer):
             weighted_loss = loss * self.layer_weights.get(name, 1.0)
             losses[name] = weighted_loss
             total = total + weighted_loss
+        total = nvtx_end("vgg", total)
         return total, losses
 
 

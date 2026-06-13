@@ -21,17 +21,15 @@ from paddle.distributed.fleet.utils import recompute
 
 from config import ModelConfig
 from fusion import (
+    USE_TRITON_FUSION,
     FusedDepthwiseConvK3P1Triton,
     FusedLayerNormTriton,
     FusedSimpleGateAvgPoolTriton,
     FusedSimpleGateTriton,
     FusedWeightedResidualAddTriton,
 )
+from nvprof import nvtx_start, nvtx_stop, nvtx_push, nvtx_pop
 from recompute import RecomputeWithoutOutput
-
-USE_TRITON_FUSION = (
-    os.getenv("USE_TRITON_FUSION", "0") in ("true", "True", "1")
-)
 
 
 def simple_gate(x):
@@ -139,7 +137,7 @@ class NAFBlock(nn.Layer):
     def forward(self, inp):
         N, H, W, C = inp.shape
         name = f"block_{N}x{H}x{W}x{C}"
-        paddle.base.core.nvprof_nvtx_push(name + "_fw")
+        nvtx_push(name + "_fw")
 
         ctx = RecomputeWithoutOutput(name)
         mid, x = ctx.recompute(self._forward_impl, inp)
@@ -147,7 +145,7 @@ class NAFBlock(nn.Layer):
         out = weighted_residual_add(mid, x, self.gamma)
         ctx.discard_output_and_register_recompute(out)
 
-        paddle.base.core.nvprof_nvtx_pop()
+        nvtx_pop()
         return out
 
 
@@ -251,17 +249,17 @@ if __name__ == "__main__":
     events = [(new_event(), new_event()) for _ in range(10)]
 
     paddle.device.reset_max_memory_allocated()
-    paddle.base.core.nvprof_start()
+    nvtx_start()
 
     for e0, e1 in events:
         inp = inp.detach()
         inp.stop_gradient = False
         e0.record()
 
-        paddle.base.core.nvprof_nvtx_push("forward")
+        nvtx_push("forward")
         with paddle.amp.auto_cast(enable=True, level="O2", dtype="bfloat16"):
             out = model(inp, mask)
-        paddle.base.core.nvprof_nvtx_pop()
+        nvtx_pop()
 
         print(
             f"after fw: use={paddle.device.memory_allocated()/2**30:.3f}"
@@ -269,9 +267,9 @@ if __name__ == "__main__":
         )
         paddle.device.reset_max_memory_allocated()
 
-        paddle.base.core.nvprof_nvtx_push("backward")
+        nvtx_push("backward")
         out.backward()
-        paddle.base.core.nvprof_nvtx_pop()
+        nvtx_pop()
 
         print(
             f"after bw: use={paddle.device.memory_allocated()/2**30:.3f}"
@@ -280,11 +278,12 @@ if __name__ == "__main__":
         paddle.device.reset_max_memory_allocated()
         e1.record()
 
-        paddle.base.core.nvprof_nvtx_push("optimizer")
+        nvtx_push("optimizer")
         optimizer.step()
-        paddle.base.core.nvprof_nvtx_pop()
+        optimizer.clear_grad()
+        nvtx_pop()
 
-    paddle.base.core.nvprof_stop()
+    nvtx_stop()
     paddle.device.synchronize()
 
     for e0, e1 in events:

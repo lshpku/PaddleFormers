@@ -1,6 +1,7 @@
 import paddle
 from paddle.framework import core
 from paddle.distributed.fleet.recompute.recompute import detach_variable
+from nvprof import nvtx_push, nvtx_pop
 
 
 class RecomputeWithoutOutputFunction(paddle.autograd.PyLayer):
@@ -21,13 +22,13 @@ class RecomputeWithoutOutputFunction(paddle.autograd.PyLayer):
 
         flag = "FLAGS_share_tensor_for_grad_tensor_holder"
         paddle.set_flags({flag: True})
-        paddle.base.core.nvprof_nvtx_push("backward")
+        nvtx_push("backward")
 
         with paddle.amp.auto_cast(enable=False):
             paddle.autograd.backward(outputs, output_grads)
 
-        paddle.base.core.nvprof_nvtx_pop()
-        paddle.base.core.nvprof_nvtx_pop()  # _recompute begin
+        nvtx_pop()
+        nvtx_pop()  # _recompute begin
         paddle.set_flags({flag: False})
 
         ctx.outputs = None
@@ -61,7 +62,7 @@ class RecomputeWithoutOutput:
         return outputs
 
     def _recompute(self, grad):
-        paddle.base.core.nvprof_nvtx_push(self.name + "_bw")
+        nvtx_push(self.name + "_bw")
         inputs = detach_variable(self.ctx.saved_tensor())
 
         with paddle.amp.auto_cast(
@@ -71,9 +72,9 @@ class RecomputeWithoutOutput:
             level="O2",
             dtype="bfloat16",
         ):
-            paddle.base.core.nvprof_nvtx_push("forward")
+            nvtx_push("forward")
             outputs = self.run_function(*inputs)
-            paddle.base.core.nvprof_nvtx_pop()
+            nvtx_pop()
 
         if isinstance(outputs, paddle.Tensor):
             outputs = (outputs,)
