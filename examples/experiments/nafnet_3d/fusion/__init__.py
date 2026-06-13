@@ -5,6 +5,7 @@ USE_TRITON_FUSION = paddle.utils.strtobool(os.getenv("USE_TRITON_FUSION", "0"))
 
 from .bias_relu import FusedBiasReluTriton
 from .depthwise_conv import FusedDepthwiseConvK3P1Triton
+from .grad_clip import clip_grad_norm_
 from .l1_loss import FusedL1LossTriton
 from .layernorm import FusedLayerNormTriton
 from .simple_gate import FusedSimpleGateTriton

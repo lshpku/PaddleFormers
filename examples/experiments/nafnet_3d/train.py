@@ -105,10 +105,6 @@ def main():
     if tcfg.dtype == "bf16":
         print("[amp] decorate model/optimizer with O2 bf16")
         ocfg = cfg.optim
-        grad_clip = (
-            paddle.nn.ClipGradByGlobalNorm(ocfg.grad_clip)
-            if ocfg.grad_clip is not None else None
-        )
         optimizer = paddle.optimizer.AdamW(
             parameters=model.parameters(),
             learning_rate=ocfg.lr,
@@ -116,7 +112,6 @@ def main():
             beta2=ocfg.betas[1],
             weight_decay=ocfg.weight_decay,
             epsilon=ocfg.eps,
-            grad_clip=grad_clip,
             multi_precision=True,
         )
         model, optimizer = paddle.amp.decorate(

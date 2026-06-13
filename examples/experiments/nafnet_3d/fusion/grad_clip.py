@@ -1,6 +1,7 @@
 import paddle
 from paddle import Tensor
 from paddle.nn import Parameter, Linear, Sequential
+from async_utils import to_device
 
 paddle.enable_compat(scope={"triton"})
 
@@ -134,8 +135,8 @@ def clip_grad_norm_(parameters: list[Parameter], max_norm: float) -> Tensor:
                 size_list.append(min(block_size, grad.size - off))
         n_chunks = len(addr_list)
         n_programs = n_chunks * share
-        addrs = paddle.to_tensor(addr_list, dtype="int64")
-        sizes = paddle.to_tensor(size_list, dtype="int64")
+        addrs = to_device(addr_list, dtype="int64")
+        sizes = to_device(size_list, dtype="int64")
         plans.append((block_size, share, dtype, addrs, sizes, total_programs, n_programs))
         total_programs += n_programs
 
@@ -152,7 +153,7 @@ def clip_grad_norm_(parameters: list[Parameter], max_norm: float) -> Tensor:
     global_norm = partial_norms.sum().sqrt()
 
     # standard clip: ratio = min(max_norm / (global_norm + eps), 1.0)
-    ratio = (max_norm / (global_norm + 1e-6)).clip(max=1.0).float().reshape([1])
+    ratio = (max_norm / (global_norm + 1e-6)).clip(max=1.0)
 
     for block_size, share, dtype, addrs, sizes, _off, n_progs in plans:
         apply_clip_kernel[(n_progs,)](
@@ -170,9 +171,10 @@ def clip_grad_norm_(parameters: list[Parameter], max_norm: float) -> Tensor:
 def _ref_clip_grad_norm_(grads: list[Tensor], max_norm: float) -> Tensor:
     sq = paddle.stack([(g.float() ** 2).sum() for g in grads]).sum()
     global_norm = sq.sqrt()
-    ratio = max_norm / paddle.maximum(global_norm + 1e-6, paddle.to_tensor(max_norm, dtype="float32"))
+    max_norm = paddle.to_tensor(max_norm, dtype="float32")
+    ratio = max_norm / paddle.maximum(global_norm + 1e-6, max_norm)
     for g in grads:
-        g.scale_(ratio.item())
+        g.scale_(ratio)
     return global_norm
 
 

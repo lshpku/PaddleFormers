@@ -40,7 +40,8 @@ from paddle import Tensor
 from async_utils import to_device, to_host, wait_to_device
 from config import Config
 from vgg_loss import VGGLoss
-from nvprof import nvtx_start, nvtx_stop
+from nvprof import nvtx_start, nvtx_stop, nvtx_range
+from fusion import USE_TRITON_FUSION, clip_grad_norm_
 
 
 class ShuffleBatchSampler:
@@ -218,14 +219,31 @@ class Trainer:
             return {}
         return {key: value / num_batches for key, value in eval_logs.items()}
 
+    def _clip_grad(self, max_norm) -> float:
+        parameters = self.model.parameters()
+        if USE_TRITON_FUSION:
+            return clip_grad_norm_(parameters, max_norm)
+        return paddle.nn.utils.clip_grad_norm_(parameters, max_norm)
+
     def _optimizer_step(self) -> float:
-        self.optimizer.step()
-        self.optimizer.clear_grad()
-        if hasattr(paddle, "_global_norm"):
-            grad_norm = paddle._global_norm
-            del paddle._global_norm
-        else:
-            grad_norm = -1.0
+        with nvtx_range("optimizer"):
+            grad_clip = self.cfg.optim.grad_clip
+            if grad_clip is not None:
+                with nvtx_range("clip_grad"):
+                    grad_norm = self._clip_grad(grad_clip)
+                grad_norm = to_host(grad_norm)
+                norm_event = paddle.device.Event()
+                norm_event.record()
+            else:
+                grad_norm = -1.0
+
+            with nvtx_range("step"):
+                self.optimizer.step()
+            with nvtx_range("clear_grad"):
+                self.optimizer.clear_grad()
+
+        if grad_clip is not None:
+            norm_event.synchronize()
         return grad_norm
 
     def _maybe_save(self):

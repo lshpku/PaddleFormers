@@ -4,6 +4,7 @@ nsys profile -t cuda,nvtx --capture-range=cudaProfilerApi -x true --cuda-event-t
 python model.py
 """
 import os
+import contextlib
 import paddle
 from paddle.autograd import PyLayer
 
@@ -52,6 +53,15 @@ class _NvtxEnd(PyLayer):
         nvtx_push(ctx.name + "_bw")
         _nvtx_stack.append(ctx.name)
         return _unwrap_output(grads)
+
+
+@contextlib.contextmanager
+def nvtx_range(name):
+    nvtx_push(name)
+    try:
+        yield
+    finally:
+        nvtx_pop()
 
 
 _nvtx_stack = []
