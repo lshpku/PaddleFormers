@@ -66,6 +66,7 @@ class TrainConfig:
     batch_size: int = 1
     num_workers: int = 0  # smoke 先 0，避免 fork 问题
     grad_accum_steps: int = 4  # 梯度累加
+    master_grad: bool = False
 
     # scheduling
     max_steps: int = 100  # 总 optimizer.step 次数

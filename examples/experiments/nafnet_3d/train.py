@@ -86,8 +86,9 @@ def main():
         raise SystemExit("请指定 --config <yaml> 或 --smoke")
     print(cfg)
 
-    paddle.seed(cfg.train.seed)
-    np.random.seed(cfg.train.seed)
+    tcfg = cfg.train
+    paddle.seed(tcfg.seed)
+    np.random.seed(tcfg.seed)
 
     print("[build] dataset...")
     train_dataset, eval_dataset = build_dataset(cfg.data)
@@ -101,7 +102,7 @@ def main():
     print(f"  -> params = {n_params/1e6:.2f}M")
 
     # bf16 O2: decorate model + optimizer
-    if cfg.train.dtype == "bf16":
+    if tcfg.dtype == "bf16":
         print("[amp] decorate model/optimizer with O2 bf16")
         ocfg = cfg.optim
         grad_clip = (
@@ -123,18 +124,18 @@ def main():
             optimizers=optimizer,
             level="O2",
             dtype="bfloat16",
-            master_grad=True,
+            master_grad=tcfg.master_grad,
         )
         trainer = Trainer(cfg, model, train_dataset, optimizer, eval_dataset)
     else:
-        raise NotImplementedError(f"only supports bf16 training, got: {cfg.train.dtype}")
+        raise NotImplementedError(f"only supports bf16 training, got: {tcfg.dtype}")
 
     if args.resume:
         trainer.load_ckpt(args.resume)
 
     print(
-        f"[run] device={trainer.device}, dtype={cfg.train.dtype}, "
-        f"max_steps={cfg.train.max_steps}, accum={cfg.train.grad_accum_steps}"
+        f"[run] device={trainer.device}, dtype={tcfg.dtype}, "
+        f"max_steps={tcfg.max_steps}, accum={tcfg.grad_accum_steps}"
     )
     trainer.fit()
     print("[done]")
