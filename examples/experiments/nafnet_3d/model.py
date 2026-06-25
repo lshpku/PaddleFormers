@@ -219,6 +219,91 @@ class NAFNet3D(nn.Layer):
         return x
 
 
+from paddle.base.core import CUDAGraph
+from paddle.device.cuda import graphs
+
+
+class GudaGraphRunner(PyLayer):
+    @staticmethod
+    def forward(ctx, _, model):
+        ctx.model = model
+        return ctx.model.output
+
+    @staticmethod
+    def backward(ctx, grad):
+        ctx.model.output_grad.copy_(grad)
+        ctx.model.bwd_graph.replay()
+        return None
+
+
+def copy_or_clone(a, b):
+    if a is None:
+        return b.detach().clone()
+    a.copy_(b)
+    return a
+
+
+class GudaGraphModel(NAFNet3D):
+    WARMUP = 3
+
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+        pool_id = CUDAGraph.gen_new_memory_pool_id()
+        print("[cudagraph] new pool_id:", pool_id)
+        self.fwd_graph = graphs.CUDAGraph(pool_id=pool_id)
+        self.bwd_graph = graphs.CUDAGraph(pool_id=pool_id)
+
+        self.inp = None
+        self.mask = None
+        self.output = None
+        self.output_grad = None
+
+    def _warmup(self):
+        output = super().forward(self.inp, self.mask)
+        grad = paddle.randn_like(output)
+        output.backward(grad)
+        self.clear_gradients(set_to_zero=False)
+
+    def _forward_impl(self):
+        self.fwd_graph.replay()
+        # PyLayer requires at least one tensor input
+        x = paddle.empty([0])
+        x.stop_gradient = False
+        return GudaGraphRunner.apply(x, self)
+
+    def forward(self, inp, mask):
+        self.inp = copy_or_clone(self.inp, inp)
+        self.mask = copy_or_clone(self.mask, mask)
+
+        if self.output is not None:
+            return self._forward_impl()
+
+        print(f"[cudagraph] warmup for {self.WARMUP} times")
+        for i in range(self.WARMUP):
+            paddle.base.core.nvprof_nvtx_push("warmup")
+            self._warmup()
+            paddle.base.core.nvprof_nvtx_pop()
+
+        print("[cudagraph] capturing forward graph")
+        paddle.device.synchronize()
+        self.fwd_graph.capture_begin()
+        self.output = super().forward(self.inp, self.mask)
+        self.fwd_graph.capture_end()
+
+        print("[cudagraph] capturing backward graph")
+        self.output_grad = paddle.empty_like(self.output)
+        paddle.device.synchronize()
+        self.bwd_graph.capture_begin()
+        self.output.backward(self.output_grad)
+        self.bwd_graph.capture_end()
+
+        print("[cudagraph] done capturing")
+        paddle.device.synchronize()
+
+        return self._forward_impl()
+
+
 if __name__ == "__main__":
     cfg = ModelConfig(
         input_mask=True,
@@ -228,7 +313,8 @@ if __name__ == "__main__":
         dec_blk_nums=[16, 8, 4, 4],
     )
 
-    model = NAFNet3D(cfg)
+    # model = NAFNet3D(cfg)
+    model = GudaGraphModel(cfg)
     optimizer = paddle.optimizer.AdamW(
         parameters=model.parameters(),
         multi_precision=True,
